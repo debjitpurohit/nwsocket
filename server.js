@@ -18,7 +18,7 @@ const wss = new WebSocketServer({ server });
 
 // In-memory drivers store
 // { [driverId]: { id, wallet, status, vehicle_type, rate, pushToken, latitude, longitude } }
-const drivers: any = {};
+const drivers = {};
 
 wss.on("connection", (ws) => {
   ws.on("message", async (msg) => {
@@ -90,6 +90,7 @@ wss.on("connection", (ws) => {
 server.listen(PORT, () => {
   console.log(`✅ Express + WebSocket server running on port ${PORT}`);
 });
+
 
 
 
