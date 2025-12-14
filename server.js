@@ -11,7 +11,7 @@ const PORT = process.env.PORT || 3000;
 
 app.get("/health", (_, res) => res.json({ status: "ok" }));
 
-// driverId -> driverData
+// driverId -> driver data
 const drivers = new Map();
 // ws -> driverId
 const socketToDriver = new Map();
@@ -23,14 +23,14 @@ wss.on("connection", (ws) => {
     try {
       const data = JSON.parse(msg.toString());
 
-      // ================= DRIVER LOCATION =================
+      // ===== DRIVER HEARTBEAT / LOCATION =====
       if (data.type === "locationUpdate" && data.role === "driver") {
         const { driver: driverId, data: location } = data;
 
         socketToDriver.set(ws, driverId);
 
         if (!drivers.has(driverId)) {
-          // ⏳ fetch once
+          // fetch only once
           const res = await axios.get(
             `https://nwserver2.onrender.com/api/v1/driver/socket/${driverId}`
           );
@@ -48,12 +48,13 @@ wss.on("connection", (ws) => {
         }
       }
 
-      // ================= USER REQUEST =================
+      // ===== USER REQUEST =====
       if (data.type === "requestRide" && data.role === "user") {
         const { latitude, longitude, vehicleType } = data;
 
         const nearbyDrivers = [...drivers.values()]
           .filter((d) => {
+            // 🔥 ONLY ONLINE DRIVERS
             if (!d.socket || d.socket.readyState !== 1) return false;
 
             const distance = geolib.getDistance(
@@ -89,7 +90,7 @@ wss.on("connection", (ws) => {
     }
   });
 
-  // 🔥 VERY IMPORTANT
+  // 🔥 DRIVER APP CLOSED / OFFLINE
   ws.on("close", () => {
     const driverId = socketToDriver.get(ws);
     if (driverId) {
@@ -103,7 +104,3 @@ wss.on("connection", (ws) => {
 server.listen(PORT, () =>
   console.log(`✅ Socket server running on ${PORT}`)
 );
-
-
-
-
