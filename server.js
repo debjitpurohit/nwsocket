@@ -7,18 +7,17 @@ import axios from "axios";
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Health check
+// Optional health check route
 app.get("/health", (req, res) => res.json({ status: "ok" }));
 
 // HTTP server
 const server = http.createServer(app);
 
-// WebSocket server
+// WebSocket server attached to the same HTTP server
 const wss = new WebSocketServer({ server });
 
-// In-memory drivers store
-// { [driverId]: { id, wallet, status, vehicle_type, rate, pushToken, latitude, longitude } }
-const drivers = {};
+// Memory-only drivers storage
+const drivers = {}; // { [driverId]: {id, wallet, status, vehicle_type, rate, pushToken, latitude, longitude, lastSeen} }
 
 wss.on("connection", (ws) => {
   ws.on("message", async (msg) => {
@@ -30,10 +29,10 @@ wss.on("connection", (ws) => {
         const { driver: driverId, data: location } = data;
 
         if (!drivers[driverId]) {
-          // Fetch driver info ONCE
-          const res = await axios.get(
-            `https://nwserver2.onrender.com/api/v1/driver/socket/${driverId}`
-          );
+  // Fetch driver info once from deployed backend
+  const res = await axios.get(
+    `https://nwserver2.onrender.com/api/v1/driver/socket/${driverId}`
+  );
 
           drivers[driverId] = {
             ...res.data,
@@ -51,20 +50,20 @@ wss.on("connection", (ws) => {
         const { latitude, longitude, vehicleType } = data;
 
         const nearbyDrivers = Object.values(drivers)
-          .filter((d: any) => {
+          .filter((d) => {
             const distance = geolib.getDistance(
               { latitude, longitude },
               { latitude: d.latitude, longitude: d.longitude }
             );
 
             return (
-              distance <= 5000 &&           // 5 km
+              distance <= 5000 && // 5 km
               d.wallet >= 1 &&
               d.status === "active" &&
               d.vehicle_type === vehicleType
             );
           })
-          .map((d: any) => ({
+          .map((d) => ({
             id: d.id,
             latitude: d.latitude,
             longitude: d.longitude,
@@ -86,10 +85,15 @@ wss.on("connection", (ws) => {
   });
 });
 
+// Cleanup offline drivers (memory-only)
+
+
 // Start server
 server.listen(PORT, () => {
   console.log(`✅ Express + WebSocket server running on port ${PORT}`);
 });
+
+
 
 
 
