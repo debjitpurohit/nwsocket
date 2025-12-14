@@ -1,23 +1,36 @@
 import express from "express";
-import { WebSocketServer } from "ws";
 import http from "http";
+import { WebSocketServer } from "ws";
 import geolib from "geolib";
 import axios from "axios";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Optional health check route
-app.get("/health", (req, res) => res.json({ status: "ok" }));
+// Health check (Render likes this)
+app.get("/health", (req, res) => {
+  res.json({ status: "ok" });
+});
 
-// HTTP server
 const server = http.createServer(app);
-
-// WebSocket server attached to the same HTTP server
 const wss = new WebSocketServer({ server });
 
-// Memory-only drivers storage
-const drivers = {}; // { [driverId]: {id, wallet, status, vehicle_type, rate, pushToken, latitude, longitude, lastSeen} }
+/**
+ * drivers = {
+ *   driverId: {
+ *     state: "PENDING" | "READY",
+ *     id,
+ *     wallet,
+ *     status,
+ *     vehicle_type,
+ *     rate,
+ *     pushToken,
+ *     latitude,
+ *     longitude
+ *   }
+ * }
+ */
+const drivers = {};
 
 wss.on("connection", (ws) => {
   ws.on("message", async (msg) => {
@@ -26,20 +39,35 @@ wss.on("connection", (ws) => {
 
       // ================= DRIVER LOCATION =================
       if (data.type === "locationUpdate" && data.role === "driver") {
-        const { driver: driverId, data: location } = data;
+        const driverId = data.driver;
+        const location = data.data;
 
+        // First time driver seen
         if (!drivers[driverId]) {
-  // Fetch driver info once from deployed backend
-  const res = await axios.get(
-    `https://nwserver2.onrender.com/api/v1/driver/socket/${driverId}`
-  );
-
           drivers[driverId] = {
-            ...res.data,
+            state: "PENDING",
             latitude: location.latitude,
             longitude: location.longitude,
           };
+
+          // fetch driver static data in background (NO await)
+          axios
+            .get(
+              `https://nwserver2.onrender.com/api/v1/driver/socket/${driverId}`
+            )
+            .then((res) => {
+              drivers[driverId] = {
+                ...drivers[driverId],
+                ...res.data,
+                state: "READY",
+              };
+            })
+            .catch((err) => {
+              console.log("Driver fetch failed:", driverId);
+              delete drivers[driverId];
+            });
         } else {
+          // Update live location
           drivers[driverId].latitude = location.latitude;
           drivers[driverId].longitude = location.longitude;
         }
@@ -49,35 +77,53 @@ wss.on("connection", (ws) => {
       if (data.type === "requestRide" && data.role === "user") {
         const { latitude, longitude, vehicleType } = data;
 
-        const nearbyDrivers = Object.values(drivers)
-          .filter((d) => {
-            const distance = geolib.getDistance(
-              { latitude, longitude },
-              { latitude: d.latitude, longitude: d.longitude }
-            );
+        const findDrivers = () =>
+          Object.values(drivers)
+            .filter((d) => {
+              if (d.state !== "READY") return false;
 
-            return (
-              distance <= 5000 && // 5 km
-              d.wallet >= 1 &&
-              d.status === "active" &&
-              d.vehicle_type === vehicleType
-            );
-          })
-          .map((d) => ({
-            id: d.id,
-            latitude: d.latitude,
-            longitude: d.longitude,
-            rate: d.rate,
-            pushToken: d.pushToken,
-            vehicle_type: d.vehicle_type,
-          }));
+              const distance = geolib.getDistance(
+                { latitude, longitude },
+                { latitude: d.latitude, longitude: d.longitude }
+              );
 
-        ws.send(
-          JSON.stringify({
-            type: "nearbyDrivers",
-            drivers: nearbyDrivers,
-          })
-        );
+              return (
+                distance <= 5000 &&
+                d.wallet >= 1 &&
+                d.status === "active" &&
+                d.vehicle_type === vehicleType
+              );
+            })
+            .map((d) => ({
+              id: d.id,
+              latitude: d.latitude,
+              longitude: d.longitude,
+              rate: d.rate,
+              pushToken: d.pushToken,
+              vehicle_type: d.vehicle_type,
+            }));
+
+        let nearbyDrivers = findDrivers();
+
+        // If axios data not ready yet → wait 1.5 sec and retry once
+        if (nearbyDrivers.length === 0) {
+          setTimeout(() => {
+            nearbyDrivers = findDrivers();
+            ws.send(
+              JSON.stringify({
+                type: "nearbyDrivers",
+                drivers: nearbyDrivers,
+              })
+            );
+          }, 1500);
+        } else {
+          ws.send(
+            JSON.stringify({
+              type: "nearbyDrivers",
+              drivers: nearbyDrivers,
+            })
+          );
+        }
       }
     } catch (err) {
       console.error("Socket error:", err);
@@ -85,13 +131,10 @@ wss.on("connection", (ws) => {
   });
 });
 
-// Cleanup offline drivers (memory-only)
-
-
-// Start server
 server.listen(PORT, () => {
-  console.log(`✅ Express + WebSocket server running on port ${PORT}`);
+  console.log(`✅ Express + WebSocket running on port ${PORT}`);
 });
+
 
 
 
