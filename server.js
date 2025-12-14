@@ -7,39 +7,44 @@ import axios from "axios";
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
-
 const PORT = process.env.PORT || 3000;
 
-// driverId -> driver data
-const drivers = {};
+app.get("/health", (_, res) => res.json({ status: "ok" }));
+
+// driverId -> driverData
+const drivers = new Map();
+// ws -> driverId
+const socketToDriver = new Map();
 
 wss.on("connection", (ws) => {
-  let currentDriverId = null;
+  console.log("🔌 socket connected");
 
   ws.on("message", async (msg) => {
     try {
       const data = JSON.parse(msg.toString());
 
-      // ================= DRIVER LOCATION / HEARTBEAT =================
+      // ================= DRIVER LOCATION =================
       if (data.type === "locationUpdate" && data.role === "driver") {
         const { driver: driverId, data: location } = data;
-        currentDriverId = driverId;
 
-        if (!drivers[driverId]) {
+        socketToDriver.set(ws, driverId);
+
+        if (!drivers.has(driverId)) {
+          // ⏳ fetch once
           const res = await axios.get(
             `https://nwserver2.onrender.com/api/v1/driver/socket/${driverId}`
           );
 
-          drivers[driverId] = {
+          drivers.set(driverId, {
             ...res.data,
             latitude: location.latitude,
             longitude: location.longitude,
-            lastSeen: Date.now(),
-          };
+            socket: ws,
+          });
         } else {
-          drivers[driverId].latitude = location.latitude;
-          drivers[driverId].longitude = location.longitude;
-          drivers[driverId].lastSeen = Date.now();
+          const d = drivers.get(driverId);
+          d.latitude = location.latitude;
+          d.longitude = location.longitude;
         }
       }
 
@@ -47,8 +52,10 @@ wss.on("connection", (ws) => {
       if (data.type === "requestRide" && data.role === "user") {
         const { latitude, longitude, vehicleType } = data;
 
-        const nearbyDrivers = Object.values(drivers)
+        const nearbyDrivers = [...drivers.values()]
           .filter((d) => {
+            if (!d.socket || d.socket.readyState !== 1) return false;
+
             const distance = geolib.getDistance(
               { latitude, longitude },
               { latitude: d.latitude, longitude: d.longitude }
@@ -58,8 +65,7 @@ wss.on("connection", (ws) => {
               distance <= 5000 &&
               d.wallet >= 1 &&
               d.status === "active" &&
-              d.vehicle_type === vehicleType &&
-              Date.now() - d.lastSeen < 15000 // 🔥 very important
+              d.vehicle_type === vehicleType
             );
           })
           .map((d) => ({
@@ -79,30 +85,25 @@ wss.on("connection", (ws) => {
         );
       }
     } catch (err) {
-      console.log("Socket error:", err);
+      console.error("Socket error:", err);
     }
   });
 
-  // ================= DRIVER DISCONNECT =================
+  // 🔥 VERY IMPORTANT
   ws.on("close", () => {
-    if (currentDriverId) {
-      delete drivers[currentDriverId];
+    const driverId = socketToDriver.get(ws);
+    if (driverId) {
+      drivers.delete(driverId);
+      socketToDriver.delete(ws);
+      console.log("❌ driver offline:", driverId);
     }
   });
 });
 
-// ================= CLEANUP OFFLINE DRIVERS =================
-setInterval(() => {
-  const now = Date.now();
-  for (const id in drivers) {
-    if (now - drivers[id].lastSeen > 20000) {
-      delete drivers[id];
-    }
-  }
-}, 5000);
-
 server.listen(PORT, () =>
   console.log(`✅ Socket server running on ${PORT}`)
 );
+
+
 
 
