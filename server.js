@@ -29,10 +29,10 @@ wss.on("connection", (ws) => {
         const { driver: driverId, data: location } = data;
 
         if (!drivers[driverId]) {
-          // Fetch driver info once from backend
-          const res = await axios.get(
-            `${process.env.BACKEND_URL}/api/v1/driver/socket/${driverId}`
-          );
+  // Fetch driver info once from deployed backend
+  const res = await axios.get(
+    `https://nwserver2.onrender.com/api/v1/driver/socket/${driverId}`
+  );
 
           drivers[driverId] = {
             ...res.data,
@@ -100,3 +100,4 @@ setInterval(() => {
 server.listen(PORT, () => {
   console.log(`✅ Express + WebSocket server running on port ${PORT}`);
 });
+
