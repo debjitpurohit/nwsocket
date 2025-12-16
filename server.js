@@ -362,17 +362,25 @@ import axios from "axios";
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
+
 const PORT = process.env.PORT || 3000;
 
-app.get("/health", (_, res) => res.json({ status: "ok" }));
+// ===============================
+// DRIVER MEMORY
+// ===============================
+const drivers = new Map();       // driverId -> driverData
+const socketToDriver = new Map(); // ws -> driverId
 
-// ===== Driver Memory =====
-// driverId -> driverData
-const drivers = new Map();
-// ws -> driverId
-const socketToDriver = new Map();
+// ===============================
+// HEALTH CHECK
+// ===============================
+app.get("/health", (_, res) => {
+  res.json({ status: "ok" });
+});
 
-// ===== Socket Connection =====
+// ===============================
+// SOCKET CONNECTION
+// ===============================
 wss.on("connection", (ws) => {
   console.log("🔌 socket connected");
 
@@ -380,9 +388,13 @@ wss.on("connection", (ws) => {
     try {
       const data = JSON.parse(msg.toString());
 
-      // ===== LOCATION UPDATE =====
+      // ===============================
+      // LOCATION UPDATE
+      // ===============================
       if (data.type === "locationUpdate" && data.role === "driver") {
-        const { driver: driverId, data: location } = data;
+        const driverId = data.driver;
+        const location = data.data;
+
         socketToDriver.set(ws, driverId);
 
         if (!drivers.has(driverId)) {
@@ -392,15 +404,19 @@ wss.on("connection", (ws) => {
           );
 
           drivers.set(driverId, {
-            ...res.data,
+            id: res.data.id,
             latitude: location.latitude,
             longitude: location.longitude,
-            socket: ws,
+            wallet: res.data.wallet,
+            rate: res.data.rate,
+            vehicle_type: res.data.vehicle_type,
+            pushToken: res.data.pushToken,
             status: res.data.status || "inactive",
+            socket: ws,
             lastSeen: Date.now(),
           });
 
-          console.log("🟢 driver online:", driverId);
+          console.log("🟢 driver registered:", driverId);
         } else {
           const d = drivers.get(driverId);
           d.latitude = location.latitude;
@@ -409,7 +425,9 @@ wss.on("connection", (ws) => {
         }
       }
 
-      // ===== HEARTBEAT =====
+      // ===============================
+      // HEARTBEAT
+      // ===============================
       if (data.type === "heartbeat" && data.role === "driver") {
         const driverId = data.driver;
         if (drivers.has(driverId)) {
@@ -417,22 +435,27 @@ wss.on("connection", (ws) => {
         }
       }
 
-      // ===== STATUS TOGGLE =====
+      // ===============================
+      // STATUS TOGGLE (ON / OFF)
+      // ===============================
       if (data.type === "statusUpdate" && data.role === "driver") {
         const { driver: driverId, status } = data;
+
         if (drivers.has(driverId)) {
           drivers.get(driverId).status = status;
+        }
 
-          if (status === "inactive") {
-            drivers.delete(driverId);
-            console.log("🔴 driver set inactive & removed:", driverId);
-          } else {
-            console.log("🟢 driver set active:", driverId);
-          }
+        if (status === "inactive") {
+          drivers.delete(driverId);
+          console.log("🔴 driver inactive:", driverId);
+        } else {
+          console.log("🟢 driver active:", driverId);
         }
       }
 
-      // ===== USER REQUEST =====
+      // ===============================
+      // USER REQUEST RIDE
+      // ===============================
       if (data.type === "requestRide" && data.role === "user") {
         const { latitude, longitude, vehicleType } = data;
         const now = Date.now();
@@ -440,7 +463,7 @@ wss.on("connection", (ws) => {
         const nearbyDrivers = [...drivers.values()]
           .filter((d) => {
             if (!d.socket || d.socket.readyState !== 1) return false;
-            if (now - d.lastSeen > 15000) return false; // heartbeat timeout
+            if (now - d.lastSeen > 15000) return false;
             if (d.status !== "active") return false;
             if (d.wallet < 1) return false;
             if (d.vehicle_type !== vehicleType) return false;
@@ -450,7 +473,7 @@ wss.on("connection", (ws) => {
               { latitude: d.latitude, longitude: d.longitude }
             );
 
-            return distance <= 5000; // within 5km
+            return distance <= 5000;
           })
           .map((d) => ({
             id: d.id,
@@ -469,34 +492,71 @@ wss.on("connection", (ws) => {
         );
       }
     } catch (err) {
-      console.error("Socket error:", err);
+      console.error("❌ socket error:", err);
     }
   });
 
-  // ===== CONNECTION CLOSE =====
-  ws.on("close", () => {
+  // ===============================
+  // SOCKET CLOSE (APP KILLED)
+  // ===============================
+  ws.on("close", async () => {
     const driverId = socketToDriver.get(ws);
+
     if (driverId) {
       drivers.delete(driverId);
       socketToDriver.delete(ws);
-      console.log("❌ driver offline:", driverId);
+
+      // 🔥 AUTO INACTIVE IN DB
+      try {
+        await axios.put(
+          `https://nwserver2.onrender.com/api/v1/driver/update-status/internal`,
+          {
+            driverId,
+            status: "inactive",
+          }
+        );
+      } catch (e) {
+        console.log("DB inactive update failed:", driverId);
+      }
+
+      console.log("❌ driver disconnected → inactive:", driverId);
     }
   });
 });
 
-// ===== HEARTBEAT CLEANUP =====
-setInterval(() => {
+// ===============================
+// HEARTBEAT CLEANUP (BACKGROUND KILL)
+// ===============================
+setInterval(async () => {
   const now = Date.now();
+
   for (const [id, d] of drivers.entries()) {
     if (now - d.lastSeen > 15000) {
       drivers.delete(id);
-      console.log("⛔ heartbeat timeout:", id);
+
+      try {
+        await axios.put(
+          `https://nwserver2.onrender.com/api/v1/driver/update-status/internal`,
+          {
+            driverId: id,
+            status: "inactive",
+          }
+        );
+      } catch (e) {
+        console.log("DB inactive update failed:", id);
+      }
+
+      console.log("⛔ heartbeat timeout → inactive:", id);
     }
   }
 }, 5000);
 
-// ===== START SERVER =====
-server.listen(PORT, () => console.log(`✅ Socket server running on ${PORT}`));
+// ===============================
+// START SERVER
+// ===============================
+server.listen(PORT, () => {
+  console.log(`✅ Socket server running on ${PORT}`);
+});
 
 
 
