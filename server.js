@@ -570,10 +570,11 @@ const wss = new WebSocketServer({ server });
 const PORT = process.env.PORT || 3000;
 
 // ===============================
-// DRIVER MEMORY
+// MEMORY
 // ===============================
-const drivers = new Map();        // driverId -> driverData
-const socketToDriver = new Map(); // ws -> driverId
+const drivers = new Map();         // driverId -> driverData
+const socketToDriver = new Map();  // ws -> driverId
+const userRequestLock = new Map(); // ws -> timestamp
 
 // ===============================
 // HEALTH CHECK
@@ -593,21 +594,36 @@ wss.on("connection", (ws) => {
       const data = JSON.parse(msg.toString());
 
       // ===============================
-      // LOCATION UPDATE
+      // DRIVER LOCATION UPDATE
       // ===============================
       if (data.type === "locationUpdate" && data.role === "driver") {
         const driverId = data.driver;
         const location = data.data;
 
+        // 🔒 ensure ONE socket per driver
+        if (drivers.has(driverId)) {
+          const old = drivers.get(driverId);
+          if (old.socket !== ws) {
+            try {
+              old.socket.close();
+            } catch {}
+          }
+        }
+
+        // clean old socket mapping
+        for (const [sock, dId] of socketToDriver.entries()) {
+          if (dId === driverId && sock !== ws) {
+            socketToDriver.delete(sock);
+          }
+        }
+
         socketToDriver.set(ws, driverId);
 
         if (!drivers.has(driverId)) {
-          // fetch driver once
           const res = await axios.get(
             `https://nwserver2.onrender.com/api/v1/driver/socket/${driverId}`
           );
 
-          // ⛔ DO NOT REGISTER BLOCKED DRIVER
           if (res.data.isBlocked) return;
 
           drivers.set(driverId, {
@@ -629,11 +645,12 @@ wss.on("connection", (ws) => {
           d.latitude = location.latitude;
           d.longitude = location.longitude;
           d.lastSeen = Date.now();
+          d.socket = ws;
         }
       }
 
       // ===============================
-      // HEARTBEAT
+      // DRIVER HEARTBEAT
       // ===============================
       if (data.type === "heartbeat" && data.role === "driver") {
         const driverId = data.driver;
@@ -643,27 +660,37 @@ wss.on("connection", (ws) => {
       }
 
       // ===============================
-      // STATUS TOGGLE (ON / OFF)
+      // DRIVER STATUS UPDATE
       // ===============================
       if (data.type === "statusUpdate" && data.role === "driver") {
         const { driver: driverId, status } = data;
 
         if (drivers.has(driverId)) {
-          drivers.get(driverId).status = status;
-        }
+          const d = drivers.get(driverId);
+          d.status = status;
 
-        if (status === "inactive") {
-          drivers.delete(driverId);
-          console.log("🔴 driver inactive:", driverId);
-        } else {
-          console.log("🟢 driver active:", driverId);
+          if (status === "inactive") {
+            try {
+              d.socket.close();
+            } catch {}
+            drivers.delete(driverId);
+            socketToDriver.delete(d.socket);
+
+            console.log("🔴 driver inactive:", driverId);
+          } else {
+            console.log("🟢 driver active:", driverId);
+          }
         }
       }
 
       // ===============================
-      // USER REQUEST RIDE
+      // USER REQUEST RIDE (DEDUPED)
       // ===============================
       if (data.type === "requestRide" && data.role === "user") {
+        const last = userRequestLock.get(ws);
+        if (last && Date.now() - last < 3000) return; // ⛔ prevent spam
+        userRequestLock.set(ws, Date.now());
+
         const { latitude, longitude, vehicleType } = data;
         const now = Date.now();
 
@@ -708,6 +735,7 @@ wss.on("connection", (ws) => {
   // ===============================
   ws.on("close", async () => {
     const driverId = socketToDriver.get(ws);
+    userRequestLock.delete(ws);
 
     if (driverId) {
       drivers.delete(driverId);
@@ -732,9 +760,15 @@ setInterval(async () => {
   const now = Date.now();
 
   for (const [driverId, d] of drivers.entries()) {
+
     // ⛔ HEARTBEAT TIMEOUT
     if (now - d.lastSeen > 15000) {
+      try {
+        d.socket.close();
+      } catch {}
+
       drivers.delete(driverId);
+      socketToDriver.delete(d.socket);
 
       try {
         await axios.put(
@@ -754,13 +788,22 @@ setInterval(async () => {
       );
 
       if (res.data.isBlocked) {
-        d.socket.close();
+        try {
+          d.socket.close();
+        } catch {}
+
         drivers.delete(driverId);
+        socketToDriver.delete(d.socket);
+
         console.log("⛔ auto blocked:", driverId);
       }
     } catch {
-      d.socket.close();
+      try {
+        d.socket.close();
+      } catch {}
+
       drivers.delete(driverId);
+      socketToDriver.delete(d.socket);
     }
   }
 }, 5000);
@@ -771,9 +814,3 @@ setInterval(async () => {
 server.listen(PORT, () => {
   console.log(`✅ Socket server running on ${PORT}`);
 });
-
-
-
-
-
-
